@@ -1,0 +1,31 @@
+#用于更新可能存在的问题,以及题库更新
+
+
+
+
+#修复12题pod IP不固定问题
+#!/bin/bash
+
+counter=0
+
+while true; do
+    sleep 3
+
+    IP=$(kubectl -n nginx-static get pod -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)
+    echo "✅ 获取到 IP：$IP"
+
+    # 删除旧的 web.k8snginx.local 记录
+    sudo sed -i '/web\.k8snginx\.local/d' /etc/hosts
+    echo "🧹 已删除旧的 web.k8snginx.local 条目"
+
+    # 写入新的 IP 映射
+    echo "$IP web.k8snginx.local" | sudo tee -a /etc/hosts
+    echo "🎉 新 IP 已写入 /etc/hosts"
+
+    # 每 600 秒执行一次 apply（3 秒 × 200 次）
+    ((counter++))
+    if (( counter >= 2 )); then
+        echo "🔄 每 600 秒执行一次 apply..."
+        counter=0
+    fi
+done
