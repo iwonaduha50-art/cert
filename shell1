@@ -1,46 +1,245 @@
-#此脚本用于修复存在的问题，以及测试是否网络正常
-echo "网络正常"
 #!/bin/bash
 set -e
 
 USER_NAME="student"
 SSHD_CONFIG="/etc/ssh/sshd_config"
+RESOLVED_CONF="/etc/systemd/resolved.conf"
+MODIFIED_SSH=0
+MODIFIED_DNS=0
+NEED_PASSWORD_RESET=0
 
-echo "[1/5] 确保用户存在：$USER_NAME"
-id "$USER_NAME" >/dev/null 2>&1 || useradd -m -s /bin/bash "$USER_NAME"
+echo "网络正常"
 
-echo "[2/5] 删除用户密码（设为空密码）"
-passwd -d "$USER_NAME"
-
-echo "[3/5] 备份 sshd_config"
-cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%F-%H%M%S)"
-
-echo "[4/5] 配置 sshd 允许空密码登录"
-# PasswordAuthentication
-if grep -q "^PasswordAuthentication" "$SSHD_CONFIG"; then
-  sed -i "s/^PasswordAuthentication.*/PasswordAuthentication yes/" "$SSHD_CONFIG"
+echo "[1/7] 检查用户状态：$USER_NAME"
+# 确保用户存在
+if ! id "$USER_NAME" >/dev/null 2>&1; then
+    echo "  用户不存在，正在创建..."
+    useradd -m -s /bin/bash "$USER_NAME"
+    NEED_PASSWORD_RESET=1
 else
-  echo "PasswordAuthentication yes" >> "$SSHD_CONFIG"
+    echo "  用户已存在"
 fi
 
-# PermitEmptyPasswords
-if grep -q "^PermitEmptyPasswords" "$SSHD_CONFIG"; then
-  sed -i "s/^PermitEmptyPasswords.*/PermitEmptyPasswords yes/" "$SSHD_CONFIG"
+echo "[2/7] 检查用户密码状态"
+# 检查密码是否为空
+if passwd -S "$USER_NAME" 2>/dev/null | grep -q "NP\|LK" || ! sudo -u "$USER_NAME" ssh-keygen -E md5 -lf /etc/shadow 2>&1 | grep -q "NP"; then
+    echo "  用户密码不为空，正在删除密码..."
+    passwd -d "$USER_NAME" 2>/dev/null || echo "  无法删除密码，可能需要手动操作"
+    NEED_PASSWORD_RESET=1
 else
-  echo "PermitEmptyPasswords yes" >> "$SSHD_CONFIG"
+    echo "  用户密码已经为空"
 fi
 
-# UsePAM
-if grep -q "^UsePAM" "$SSHD_CONFIG"; then
-  sed -i "s/^UsePAM.*/UsePAM yes/" "$SSHD_CONFIG"
+echo "[3/7] 检查SSHD配置"
+# 检查是否需要修改SSH配置
+if [ "$NEED_PASSWORD_RESET" -eq 1 ]; then
+    echo "  密码状态已更改，检查SSHD配置..."
+    
+    # 备份sshd_config
+    if [ ! -f "${SSHD_CONFIG}.bak" ]; then
+        cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%F-%H%M%S)"
+        echo "  已备份sshd_config"
+    fi
+    
+    # 检查并修改配置
+    CHANGED=0
+    
+    # PasswordAuthentication
+    if grep -q "^PasswordAuthentication" "$SSHD_CONFIG"; then
+        if ! grep -q "^PasswordAuthentication yes" "$SSHD_CONFIG"; then
+            sed -i "s/^PasswordAuthentication.*/PasswordAuthentication yes/" "$SSHD_CONFIG"
+            CHANGED=1
+            echo "  已启用PasswordAuthentication"
+        fi
+    else
+        echo "PasswordAuthentication yes" >> "$SSHD_CONFIG"
+        CHANGED=1
+        echo "  已添加PasswordAuthentication配置"
+    fi
+    
+    # PermitEmptyPasswords
+    if grep -q "^PermitEmptyPasswords" "$SSHD_CONFIG"; then
+        if ! grep -q "^PermitEmptyPasswords yes" "$SSHD_CONFIG"; then
+            sed -i "s/^PermitEmptyPasswords.*/PermitEmptyPasswords yes/" "$SSHD_CONFIG"
+            CHANGED=1
+            echo "  已启用PermitEmptyPasswords"
+        fi
+    else
+        echo "PermitEmptyPasswords yes" >> "$SSHD_CONFIG"
+        CHANGED=1
+        echo "  已添加PermitEmptyPasswords配置"
+    fi
+    
+    # UsePAM
+    if grep -q "^UsePAM" "$SSHD_CONFIG"; then
+        if ! grep -q "^UsePAM yes" "$SSHD_CONFIG"; then
+            sed -i "s/^UsePAM.*/UsePAM yes/" "$SSHD_CONFIG"
+            CHANGED=1
+            echo "  已启用UsePAM"
+        fi
+    else
+        echo "UsePAM yes" >> "$SSHD_CONFIG"
+        CHANGED=1
+        echo "  已添加UsePAM配置"
+    fi
+    
+    if [ "$CHANGED" -eq 1 ]; then
+        MODIFIED_SSH=1
+    fi
 else
-  echo "UsePAM yes" >> "$SSHD_CONFIG"
+    echo "  密码状态未更改，跳过SSHD配置检查"
 fi
 
-echo "[5/5] 重启 sshd"
-systemctl restart sshd
+echo "[4/7] 检查DNS配置状态"
+# 检查是否已配置DNS
+DNS_CONFIGURED=0
+if [ -f "$RESOLVED_CONF" ]; then
+    # 检查是否有[Resolve]段落和DNS设置
+    if grep -q "^\[Resolve\]" "$RESOLVED_CONF" && grep -q "^DNS=" "$RESOLVED_CONF" 2>/dev/null; then
+        DNS_CONFIGURED=1
+        echo "  DNS已配置"
+        
+        # 检查当前配置的DNS
+        CURRENT_DNS=$(grep "^DNS=" "$RESOLVED_CONF" | head -1 | cut -d= -f2)
+        echo "  当前DNS: $CURRENT_DNS"
+    fi
+fi
+
+echo "[5/7] 测试DNS解析"
+DNS_WORKING=0
+# 测试DNS是否正常工作
+if command -v nslookup >/dev/null 2>&1; then
+    echo "  测试github.com的DNS解析..."
+    if timeout 5 nslookup github.com >/dev/null 2>&1; then
+        DNS_WORKING=1
+        echo "  DNS解析正常"
+    else
+        echo "  DNS解析失败"
+        # 尝试使用备用DNS测试
+        echo "  尝试使用备用DNS测试..."
+        if timeout 5 nslookup github.com 1.1.1.1 >/dev/null 2>&1; then
+            echo "  使用备用DNS解析正常，当前DNS配置可能有问题"
+        else
+            echo "  备用DNS也失败，可能是网络问题"
+        fi
+    fi
+else
+    # 如果没有nslookup，使用ping测试
+    echo "  使用ping测试网络连接..."
+    if timeout 5 ping -c 2 github.com >/dev/null 2>&1; then
+        DNS_WORKING=1
+        echo "  网络连接正常"
+    else
+        echo "  网络连接失败"
+    fi
+fi
+
+echo "[6/7] 配置DNS（仅在需要时）"
+# 只有DNS未配置或DNS不工作时才配置
+if [ "$DNS_CONFIGURED" -eq 0 ] || [ "$DNS_WORKING" -eq 0 ]; then
+    echo "  DNS需要配置或修复"
+    
+    # 备份原配置文件
+    if [ -f "$RESOLVED_CONF" ]; then
+        BACKUP_FILE="${RESOLVED_CONF}.bak.$(date +%F-%H%M%S)"
+        cp "$RESOLVED_CONF" "$BACKUP_FILE"
+        echo "  已备份原配置文件到: $BACKUP_FILE"
+    fi
+    
+    # 配置DNS
+    if grep -q "^\[Resolve\]" "$RESOLVED_CONF"; then
+        # 如果已有[Resolve]段落，更新配置
+        echo "  更新现有Resolve配置..."
+        
+        # 确保DNS配置存在并正确
+        if grep -q "^DNS=" "$RESOLVED_CONF"; then
+            sed -i "s/^DNS=.*/DNS=223.5.5.5 223.6.6.6/" "$RESOLVED_CONF"
+        else
+            sed -i '/^\[Resolve\]/a DNS=223.5.5.5 223.6.6.6' "$RESOLVED_CONF"
+        fi
+        
+        # 确保FallbackDNS存在
+        if grep -q "^FallbackDNS=" "$RESOLVED_CONF"; then
+            sed -i "s/^FallbackDNS=.*/FallbackDNS=1.1.1.1 8.8.8.8/" "$RESOLVED_CONF"
+        else
+            sed -i '/^\[Resolve\]/a FallbackDNS=1.1.1.1 8.8.8.8' "$RESOLVED_CONF"
+        fi
+        
+        # 确保Domains存在
+        if ! grep -q "^Domains=" "$RESOLVED_CONF"; then
+            sed -i '/^\[Resolve\]/a Domains=~.' "$RESOLVED_CONF"
+        fi
+        
+        # 确保DNSOverTLS存在
+        if ! grep -q "^DNSOverTLS=" "$RESOLVED_CONF"; then
+            sed -i '/^\[Resolve\]/a DNSOverTLS=opportunistic' "$RESOLVED_CONF"
+        fi
+    else
+        # 如果没有[Resolve]段落，追加配置
+        echo "  添加新的Resolve配置..."
+        cat >> "$RESOLVED_CONF" << 'EOF'
+
+[Resolve]
+DNS=223.5.5.5 223.6.6.6
+FallbackDNS=1.1.1.1 8.8.8.8
+Domains=~.
+DNSOverTLS=opportunistic
+EOF
+    fi
+    
+    MODIFIED_DNS=1
+    echo "  DNS配置完成"
+else
+    echo "  DNS已配置且工作正常，跳过配置"
+fi
+
+echo "[7/7] 重启服务（仅在需要时）"
+# 只在需要时重启服务
+if [ "$MODIFIED_SSH" -eq 1 ]; then
+    echo "  重启SSHD服务..."
+    systemctl restart sshd
+    echo "  SSHD服务已重启"
+else
+    echo "  SSHD配置未更改，无需重启"
+fi
+
+if [ "$MODIFIED_DNS" -eq 1 ]; then
+    echo "  重启systemd-resolved服务..."
+    systemctl restart systemd-resolved
+    # 让DNS配置生效
+    systemctl daemon-reload
+    echo "  systemd-resolved服务已重启"
+    
+    # 再次测试DNS
+    echo "  重新测试DNS解析..."
+    if timeout 5 nslookup github.com >/dev/null 2>&1; then
+        echo "  ✅ DNS解析现在正常"
+    else
+        echo "  ⚠️  DNS解析仍然有问题，请检查网络"
+    fi
+else
+    echo "  DNS配置未更改，无需重启"
+fi
 
 echo
-echo "✅ 完成。现在可以直接："
-echo "   ssh ${USER_NAME}@<host>"
-echo "   无需输入密码即可登录"
+echo "📊 执行摘要："
+echo "================"
+echo "用户状态: $USER_NAME"
+echo "密码重置: $([ "$NEED_PASSWORD_RESET" -eq 1 ] && echo "是" || echo "否")"
+echo "SSHD修改: $([ "$MODIFIED_SSH" -eq 1 ] && echo "是" || echo "否")"
+echo "DNS修改: $([ "$MODIFIED_DNS" -eq 1 ] && echo "是" || echo "否")"
+echo "DNS工作状态: $([ "$DNS_WORKING" -eq 1 ] && echo "正常" || echo "异常")"
+echo "================"
+
+echo
+echo "当前DNS配置："
+grep -A 5 "^\[Resolve\]" "$RESOLVED_CONF" 2>/dev/null || echo "未找到Resolve配置"
+
+echo
+if [ "$NEED_PASSWORD_RESET" -eq 1 ] || [ "$MODIFIED_SSH" -eq 1 ]; then
+    echo "✅ SSH配置完成。现在可以直接："
+    echo "   ssh ${USER_NAME}@<host>"
+    echo "   无需输入密码即可登录"
+else
+    echo "ℹ️  SSH配置无需更改，保持原样"
+fi
