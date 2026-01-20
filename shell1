@@ -1,0 +1,96 @@
+#此脚本用于修复存在的问题，以及测试是否网络正常
+echo "网络正常"
+#!/bin/bash
+set -e
+
+USER_NAME="student"
+SSHD_CONFIG="/etc/ssh/sshd_config"
+
+echo "[1/5] 确保用户存在：$USER_NAME"
+id "$USER_NAME" >/dev/null 2>&1 || useradd -m -s /bin/bash "$USER_NAME"
+
+echo "[2/5] 删除用户密码（设为空密码）"
+passwd -d "$USER_NAME"
+
+echo "[3/5] 备份 sshd_config"
+cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%F-%H%M%S)"
+
+echo "[4/5] 配置 sshd 允许空密码登录"
+# PasswordAuthentication
+if grep -q "^PasswordAuthentication" "$SSHD_CONFIG"; then
+  sed -i "s/^PasswordAuthentication.*/PasswordAuthentication yes/" "$SSHD_CONFIG"
+else
+  echo "PasswordAuthentication yes" >> "$SSHD_CONFIG"
+fi
+
+# PermitEmptyPasswords
+if grep -q "^PermitEmptyPasswords" "$SSHD_CONFIG"; then
+  sed -i "s/^PermitEmptyPasswords.*/PermitEmptyPasswords yes/" "$SSHD_CONFIG"
+else
+  echo "PermitEmptyPasswords yes" >> "$SSHD_CONFIG"
+fi
+
+# UsePAM
+if grep -q "^UsePAM" "$SSHD_CONFIG"; then
+  sed -i "s/^UsePAM.*/UsePAM yes/" "$SSHD_CONFIG"
+else
+  echo "UsePAM yes" >> "$SSHD_CONFIG"
+fi
+
+echo "[5/5] 重启 sshd"
+systemctl restart sshd
+
+echo
+echo "✅ 完成。现在可以直接："
+echo "   ssh ${USER_NAME}@<host>"
+echo "   无需输入密码即可登录"
+Chat
+
+New Conversation
+
+🤓 Explain a complex thing
+
+Explain Artificial Intelligence so that I can explain it to my six-year-old child.
+
+
+🧠 Get suggestions and create new ideas
+
+Please give me the best 10 travel ideas around the world
+
+
+💭 Translate, summarize, fix grammar and more…
+
+Translate "I love you" French
+
+
+GPT-4o Mini
+Hello, how can I help you today?
+Page Content
+Page favicon
+Apache Guacamole
+http://8.163.47.216:8091/guacamole/#/settings/sessions
+ 🪄 Summarize
+Get a brief overview of the main points and key takeaways
+GPT-4o Mini
+The content mentions Apache Guacamole, a tool for remote access, along with features like file upload, inviting friends, and earning credits in a context related to a "k8s-exam" scheduled for January 14, 2026. It also notes that ChatGPT's data is not real-time, while a "WebAccess Feature" aims to enhance its ability to answer questions involving real-time information more effectively.
+GPT-4o Mini
+coin image
+10
+Upgrade
+
+
+
+
+Ask me anything...
+
+
+
+Powered by AITOPIA 
+Chat
+Ask
+Search
+Write
+Image
+ChatFile
+Vision
+Full Page
