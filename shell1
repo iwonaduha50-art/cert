@@ -197,7 +197,7 @@ echo "[7/7] 重启服务（仅在需要时）"
 # 只在需要时重启服务
 if [ "$MODIFIED_SSH" -eq 1 ]; then
     echo "  重启SSHD服务..."
-    systemctl restart sshd
+    systemctl restart ssh
     echo "  SSHD服务已重启"
 else
     echo "  SSHD配置未更改，无需重启"
