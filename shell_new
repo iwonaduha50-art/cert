@@ -1,1 +1,125 @@
+#!/bin/bash
+set -e
 
+USER_NAME="student"
+SSHD_CONFIG="/etc/ssh/sshd_config"
+MODIFIED_SSH=0
+NEED_PASSWORD_RESET=0
+
+echo "网络正常"
+
+echo "[1/4] 检查用户状态：$USER_NAME"
+# 确保用户存在
+if ! id "$USER_NAME" >/dev/null 2>&1; then
+    echo "  用户不存在，正在创建..."
+    useradd -m -s /bin/bash "$USER_NAME"
+    NEED_PASSWORD_RESET=1
+else
+    echo "  用户已存在"
+fi
+
+echo "[2/4] 检查用户密码状态"
+# 检查密码是否为空
+if passwd -S "$USER_NAME" 2>/dev/null | grep -q "NP\|LK" || ! sudo -u "$USER_NAME" ssh-keygen -E md5 -lf /etc/shadow 2>&1 | grep -q "NP"; then
+    echo "  用户密码不为空，正在删除密码..."
+    passwd -d "$USER_NAME" 2>/dev/null || echo "  无法删除密码，可能需要手动操作"
+    NEED_PASSWORD_RESET=1
+else
+    echo "  用户密码已经为空"
+fi
+
+echo "[3/4] 检查SSHD配置"
+# 检查是否需要修改SSH配置
+if [ "$NEED_PASSWORD_RESET" -eq 1 ]; then
+    echo "  密码状态已更改，检查SSHD配置..."
+    
+    # 备份sshd_config
+    if [ ! -f "${SSHD_CONFIG}.bak" ]; then
+        cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%F-%H%M%S)"
+        echo "  已备份sshd_config"
+    fi
+    
+    # 检查并修改配置
+    CHANGED=0
+    
+    # PasswordAuthentication
+    if grep -q "^PasswordAuthentication" "$SSHD_CONFIG"; then
+        if ! grep -q "^PasswordAuthentication yes" "$SSHD_CONFIG"; then
+            sed -i "s/^PasswordAuthentication.*/PasswordAuthentication yes/" "$SSHD_CONFIG"
+            CHANGED=1
+            echo "  已启用PasswordAuthentication"
+        fi
+    else
+        echo "PasswordAuthentication yes" >> "$SSHD_CONFIG"
+        CHANGED=1
+        echo "  已添加PasswordAuthentication配置"
+    fi
+    
+    # PermitEmptyPasswords
+    if grep -q "^PermitEmptyPasswords" "$SSHD_CONFIG"; then
+        if ! grep -q "^PermitEmptyPasswords yes" "$SSHD_CONFIG"; then
+            sed -i "s/^PermitEmptyPasswords.*/PermitEmptyPasswords yes/" "$SSHD_CONFIG"
+            CHANGED=1
+            echo "  已启用PermitEmptyPasswords"
+        fi
+    else
+        echo "PermitEmptyPasswords yes" >> "$SSHD_CONFIG"
+        CHANGED=1
+        echo "  已添加PermitEmptyPasswords配置"
+    fi
+    
+    # UsePAM
+    if grep -q "^UsePAM" "$SSHD_CONFIG"; then
+        if ! grep -q "^UsePAM yes" "$SSHD_CONFIG"; then
+            sed -i "s/^UsePAM.*/UsePAM yes/" "$SSHD_CONFIG"
+            CHANGED=1
+            echo "  已启用UsePAM"
+        fi
+    else
+        echo "UsePAM yes" >> "$SSHD_CONFIG"
+        CHANGED=1
+        echo "  已添加UsePAM配置"
+    fi
+    
+    if [ "$CHANGED" -eq 1 ]; then
+        MODIFIED_SSH=1
+    fi
+else
+    echo "  密码状态未更改，跳过SSHD配置检查"
+fi
+
+echo "[4/4] 重启服务（仅在需要时）"
+# 只在需要时重启服务
+if [ "$MODIFIED_SSH" -eq 1 ]; then
+    # 自动检测 SSH 服务名称（兼容 ssh 和 sshd）
+    if systemctl list-units --type=service --all 2>/dev/null | grep -q "sshd.service"; then
+        SSH_SERVICE="sshd"
+    elif systemctl list-units --type=service --all 2>/dev/null | grep -q "ssh.service"; then
+        SSH_SERVICE="ssh"
+    else
+        echo "  错误：无法找到 SSH 服务 (ssh 或 sshd)，请手动重启。"
+        exit 1
+    fi
+    echo "  重启 ${SSH_SERVICE} 服务..."
+    systemctl restart "$SSH_SERVICE"
+    echo "  ${SSH_SERVICE} 服务已重启"
+else
+    echo "  SSH 配置未更改，无需重启"
+fi
+
+echo
+echo "📊 执行摘要："
+echo "================"
+echo "用户状态: $USER_NAME"
+echo "密码重置: $([ "$NEED_PASSWORD_RESET" -eq 1 ] && echo "是" || echo "否")"
+echo "SSHD修改: $([ "$MODIFIED_SSH" -eq 1 ] && echo "是" || echo "否")"
+echo "================"
+
+echo
+if [ "$NEED_PASSWORD_RESET" -eq 1 ] || [ "$MODIFIED_SSH" -eq 1 ]; then
+    echo "✅ SSH配置完成。现在可以直接："
+    echo "   ssh ${USER_NAME}@<host>"
+    echo "   无需输入密码即可登录"
+else
+    echo "ℹ️  SSH配置无需更改，保持原样"
+fi
